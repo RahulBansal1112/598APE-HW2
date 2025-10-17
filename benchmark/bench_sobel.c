@@ -16,6 +16,8 @@
 #include <time.h>
 #include <omp.h>
 
+#define TILE_SIZE 64
+
 typedef struct {
   uint8_t *data;
   int width;
@@ -45,6 +47,7 @@ static const int sobel_gy[3][3] = {{-1, -2, -1}, {0, 0, 0}, {1, 2, 1}};
 
 static void rgb_to_grayscale(uint8_t *input, uint8_t *output, int width,
                              int height, int channels) {
+  #pragma omp parallel for schedule(static)
   for (int i = 0; i < width * height; i++) {
     if (channels >= 3) {
       uint8_t r = input[i * channels + 0];
@@ -95,46 +98,93 @@ Ciphertext encode_zero(int64_t q, Poly poly_mod) {
   return ct;
 }
 
-static void sobel_fhe(Ciphertext *input_enc, Ciphertext *output_enc, int width,
-                      int height, int64_t q, int64_t t, Poly poly_mod) {
-
-  #pragma omp parallel for schedule(static)
-  for (int y = 1; y < height - 1; y++) {
-    for (int x = 1; x < width - 1; x++) {
-      Ciphertext gx = encode_zero(q, poly_mod);
-      Ciphertext gy = encode_zero(q, poly_mod);
-
-      for (int ky = -1; ky <= 1; ky++) {
-        for (int kx = -1; kx <= 1; kx++) {
-          Ciphertext pixel = input_enc[(y + ky) * width + (x + kx)];
-
-          int coeff_gx = sobel_gx[ky + 1][kx + 1];
-          int coeff_gy = sobel_gy[ky + 1][kx + 1];
-
-          if (coeff_gx != 0) {
-            Ciphertext term = mul_plain(pixel, q, t, poly_mod, coeff_gx);
-            gx = add_cipher(gx, term, q, poly_mod);
-          }
-
-          if (coeff_gy != 0) {
-            Ciphertext term = mul_plain(pixel, q, t, poly_mod, coeff_gy);
-            gy = add_cipher(gy, term, q, poly_mod);
-          }
-        }
-      }
-
-      output_enc[y * width + x] = add_cipher(gx, gy, q, poly_mod);
-    }
-  }
-
-  Ciphertext zero = encode_zero(q, poly_mod);
+static void sobel_fhe_tiled(uint8_t *gray, uint8_t *output, int width,
+                              int height, PublicKey pk, SecretKey sk,
+                              size_t n, int64_t q, int64_t t, Poly poly_mod,
+                              double *enc_time, double *fhe_time, double *dec_time) {
+  
+  *enc_time = 0.0;
+  *fhe_time = 0.0;
+  *dec_time = 0.0;
+  
   for (int x = 0; x < width; x++) {
-    output_enc[x] = zero;
-    output_enc[(height - 1) * width + x] = zero;
+    output[x] = 0;
+    output[(height - 1) * width + x] = 0;
   }
   for (int y = 0; y < height; y++) {
-    output_enc[y * width] = zero;
-    output_enc[y * width + (width - 1)] = zero;
+    output[y * width] = 0;
+    output[y * width + (width - 1)] = 0;
+  }
+  
+  // #pragma omp parallel for schedule(static)
+  for (int chunk_start = 1; chunk_start < height - 1; chunk_start += TILE_SIZE) {
+    int chunk_end = chunk_start + TILE_SIZE;
+    if (chunk_end > height - 1) chunk_end = height - 1;
+    
+    int row_start = chunk_start - 1;
+    int row_end = chunk_end + 1;
+    if (row_end > height) row_end = height;
+    
+    int chunk_height = row_end - row_start;
+    int chunk_pixels = width * chunk_height;
+    
+    Ciphertext *chunk_enc = (Ciphertext *)malloc(chunk_pixels * sizeof(Ciphertext));
+    
+    // Encrypt chunk
+    double enc_start_time = omp_get_wtime();
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < chunk_pixels; i++) {
+      int global_idx = (row_start * width) + i;
+      chunk_enc[i] = encrypt(pk, n, q, poly_mod, t, gray[global_idx]);
+    }
+    *enc_time += omp_get_wtime() - enc_start_time;
+    
+    // Apply Sobel to this chunk
+    double fhe_start_time = omp_get_wtime();
+    
+    #pragma omp parallel for schedule(static)
+    for (int y = chunk_start; y < chunk_end; y++) {
+      for (int x = 1; x < width - 1; x++) {
+        Ciphertext gx = encode_zero(q, poly_mod);
+        Ciphertext gy = encode_zero(q, poly_mod);
+
+        for (int ky = -1; ky <= 1; ky++) {
+          for (int kx = -1; kx <= 1; kx++) {
+            int global_y = y + ky;
+            int local_y = global_y - row_start;
+            int local_idx = local_y * width + (x + kx);
+            
+            Ciphertext pixel = chunk_enc[local_idx];
+
+            int coeff_gx = sobel_gx[ky + 1][kx + 1];
+            int coeff_gy = sobel_gy[ky + 1][kx + 1];
+
+            if (coeff_gx != 0) {
+              Ciphertext term = mul_plain(pixel, q, t, poly_mod, coeff_gx);
+              gx = add_cipher(gx, term, q, poly_mod);
+            }
+
+            if (coeff_gy != 0) {
+              Ciphertext term = mul_plain(pixel, q, t, poly_mod, coeff_gy);
+              gy = add_cipher(gy, term, q, poly_mod);
+            }
+          }
+        }
+
+        // Decrypt immediately and store result
+        Ciphertext result = add_cipher(gx, gy, q, poly_mod);
+        int64_t val = decrypt(sk, n, q, poly_mod, t, result);
+        if (val > t / 2)
+          val = t - val;
+        if (val > 255)
+          val = 255;
+        output[y * width + x] = (uint8_t)val;
+      }
+    }
+    
+    *fhe_time += omp_get_wtime() - fhe_start_time;
+    
+    free(chunk_enc);
   }
 }
 
@@ -147,7 +197,6 @@ int main(int argc, char **argv) {
 
   const char *input_path = argv[1];
 
-  // Please report runtimes on the following parameters
   size_t n = 1u << 4;
   int64_t q = 1ll << 30;
   int64_t t = 1ll << 10;
@@ -171,45 +220,19 @@ int main(int argc, char **argv) {
   PublicKey pk = keys.pk;
   SecretKey sk = keys.sk;
 
-  printf("Encrypting grayscale image...\n");
-  Ciphertext *gray_enc =
-      (Ciphertext *)malloc(total_pixels * sizeof(Ciphertext));
-  double enc_start = omp_get_wtime();
-  for (int i = 0; i < total_pixels; i++) {
-    gray_enc[i] = encrypt(pk, n, q, poly_mod, t, gray[i]);
-  }
-  double enc_end = omp_get_wtime();
-  double enc_time = ((double)(enc_end - enc_start)) / 1; // CLOCKS_PER_SEC;
-
-  printf("Applying FHE Sobel edge detection...\n");
-  Ciphertext *sobel_enc =
-      (Ciphertext *)malloc(total_pixels * sizeof(Ciphertext));
-  double fhe_start = omp_get_wtime();
-  sobel_fhe(gray_enc, sobel_enc, img.width, img.height, q, t, poly_mod);
-  double fhe_end = omp_get_wtime();
-  double fhe_time = ((double)(fhe_end - fhe_start)) / 1; // CLOCKS_PER_SEC;
-
-  printf("Decrypting FHE Sobel result...\n");
+  printf("Applying FHE Sobel edge detection (tiled)...\n");
   uint8_t *fhe_sobel = (uint8_t *)malloc(total_pixels * sizeof(uint8_t));
-  double dec_start = omp_get_wtime();
-  for (int i = 0; i < total_pixels; i++) {
-    int64_t val = decrypt(sk, n, q, poly_mod, t, sobel_enc[i]);
-    // Restore negative `gx + gy`
-    if (val > t / 2)
-      val = t - val;
-    if (val > 255)
-      val = 255;
-    fhe_sobel[i] = (uint8_t)val;
-  }
-  double dec_end = omp_get_wtime();
-  double dec_time = ((double)(dec_end - dec_start)) / 1; // CLOCKS_PER_SEC;
+  
+  double enc_time, fhe_time, dec_time;
+  sobel_fhe_tiled(gray, fhe_sobel, img.width, img.height, pk, sk,
+                    n, q, t, poly_mod, &enc_time, &fhe_time, &dec_time);
 
   printf("Computing plaintext Sobel edge detection...\n");
   uint8_t *plain_sobel = (uint8_t *)calloc(total_pixels, sizeof(uint8_t));
   double plain_start = omp_get_wtime();
   sobel_plain(gray, plain_sobel, img.width, img.height);
   double plain_end = omp_get_wtime();
-  double plain_time = ((double)(plain_end - plain_start)) / 1; // CLOCKS_PER_SEC;
+  double plain_time = plain_end - plain_start;
 
   printf("\n=== Results ===\n");
   printf("Encryption time: %.4f s (%.2f ms/pixel)\n", enc_time,
@@ -230,8 +253,6 @@ int main(int argc, char **argv) {
   printf("  output/sobel_fhe.png     (FHE Sobel edges)\n");
   printf("  output/sobel_plain.png   (plaintext Sobel edges)\n");
 
-  free(gray_enc);
-  free(sobel_enc);
   free(fhe_sobel);
   free(plain_sobel);
   free(gray);
