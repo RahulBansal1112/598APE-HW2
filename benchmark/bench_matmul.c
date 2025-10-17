@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <omp.h>
 
 static int64_t **alloc_matrix(size_t rows, size_t cols) {
   int64_t **M = (int64_t **)malloc(rows * sizeof(int64_t *));
@@ -80,7 +81,7 @@ int main(int argc, char **argv) {
 
   // Plaintext reference C = A * B (mod t)
   int64_t **C_ref = alloc_matrix(dim, dim);
-  clock_t ref_start = get_wall_time();
+  double ref_start = omp_get_wtime();
 
   // Plaintext matrix multiplication
   #pragma omp parallel for schedule(static)
@@ -93,8 +94,11 @@ int main(int argc, char **argv) {
       C_ref[i][k] = acc % t;
     }
   }
-  clock_t ref_end = get_wall_time();
-  double ref_sec = ((double)(ref_end - ref_start)) / 1; // CLOCKS_PER_SEC;
+  double ref_end = omp_get_wtime();
+  double ref_sec = ref_end - ref_start;
+
+  // Start timing the entire encrypted workflow
+  double enc_start = omp_get_wtime();
 
   // Encrypt B (and optionally A)
   Ciphertext **B_enc = alloc_ct_matrix(dim, dim);
@@ -120,7 +124,6 @@ int main(int argc, char **argv) {
 
   // Encrypted matmul
   Ciphertext **C_enc = alloc_ct_matrix(dim, dim);
-  clock_t enc_start = get_wall_time();
 
   if (mode == 0) {
     // Mode 0: ct * pt matmul: C_enc[i][k] = sum_j A[i][j] * Enc(B[j][k])
@@ -165,6 +168,9 @@ int main(int argc, char **argv) {
     }
   }
 
+  double enc_end = omp_get_wtime();
+  double enc_sec = enc_end - enc_start;
+
   // Decrypt result matrix
   int64_t **C_dec = alloc_matrix(dim, dim);
   for (size_t i = 0; i < dim; ++i) {
@@ -172,9 +178,6 @@ int main(int argc, char **argv) {
       C_dec[i][k] = decrypt(sk, n, q, poly_mod, t, C_enc[i][k]);
     }
   }
-
-  clock_t enc_end = get_wall_time();
-  double enc_sec = ((double)(enc_end - enc_start)) / 1; // CLOCKS_PER_SEC;
 
   // Relative error (Frobenius): ||C_dec - C_ref||_F / ||C_ref||_F
   long double diff_acc = 0.0L;

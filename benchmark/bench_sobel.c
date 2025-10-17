@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <omp.h>
 
 typedef struct {
   uint8_t *data;
@@ -173,24 +174,24 @@ int main(int argc, char **argv) {
   printf("Encrypting grayscale image...\n");
   Ciphertext *gray_enc =
       (Ciphertext *)malloc(total_pixels * sizeof(Ciphertext));
-  clock_t enc_start = clock();
+  double enc_start = omp_get_wtime();
   for (int i = 0; i < total_pixels; i++) {
     gray_enc[i] = encrypt(pk, n, q, poly_mod, t, gray[i]);
   }
-  clock_t enc_end = clock();
-  double enc_time = ((double)(enc_end - enc_start)) / CLOCKS_PER_SEC;
+  double enc_end = omp_get_wtime();
+  double enc_time = ((double)(enc_end - enc_start)) / 1; // CLOCKS_PER_SEC;
 
   printf("Applying FHE Sobel edge detection...\n");
   Ciphertext *sobel_enc =
       (Ciphertext *)malloc(total_pixels * sizeof(Ciphertext));
-  clock_t fhe_start = clock();
+  double fhe_start = omp_get_wtime();
   sobel_fhe(gray_enc, sobel_enc, img.width, img.height, q, t, poly_mod);
-  clock_t fhe_end = clock();
-  double fhe_time = ((double)(fhe_end - fhe_start)) / CLOCKS_PER_SEC;
+  double fhe_end = omp_get_wtime();
+  double fhe_time = ((double)(fhe_end - fhe_start)) / 1; // CLOCKS_PER_SEC;
 
   printf("Decrypting FHE Sobel result...\n");
   uint8_t *fhe_sobel = (uint8_t *)malloc(total_pixels * sizeof(uint8_t));
-  clock_t dec_start = clock();
+  double dec_start = omp_get_wtime();
   for (int i = 0; i < total_pixels; i++) {
     int64_t val = decrypt(sk, n, q, poly_mod, t, sobel_enc[i]);
     // Restore negative `gx + gy`
@@ -200,15 +201,15 @@ int main(int argc, char **argv) {
       val = 255;
     fhe_sobel[i] = (uint8_t)val;
   }
-  clock_t dec_end = clock();
-  double dec_time = ((double)(dec_end - dec_start)) / CLOCKS_PER_SEC;
+  double dec_end = omp_get_wtime();
+  double dec_time = ((double)(dec_end - dec_start)) / 1; // CLOCKS_PER_SEC;
 
   printf("Computing plaintext Sobel edge detection...\n");
   uint8_t *plain_sobel = (uint8_t *)calloc(total_pixels, sizeof(uint8_t));
-  clock_t plain_start = clock();
+  double plain_start = omp_get_wtime();
   sobel_plain(gray, plain_sobel, img.width, img.height);
-  clock_t plain_end = clock();
-  double plain_time = ((double)(plain_end - plain_start)) / CLOCKS_PER_SEC;
+  double plain_end = omp_get_wtime();
+  double plain_time = ((double)(plain_end - plain_start)) / 1; // CLOCKS_PER_SEC;
 
   printf("\n=== Results ===\n");
   printf("Encryption time: %.4f s (%.2f ms/pixel)\n", enc_time,
