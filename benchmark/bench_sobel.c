@@ -220,7 +220,7 @@ int main(int argc, char **argv) {
   PublicKey pk = keys.pk;
   SecretKey sk = keys.sk;
 
-  printf("Applying FHE Sobel edge detection (tiled)...\n");
+  printf("Applying FHE Sobel edge detection...\n");
   uint8_t *fhe_sobel = (uint8_t *)malloc(total_pixels * sizeof(uint8_t));
   
   double enc_time, fhe_time, dec_time;
