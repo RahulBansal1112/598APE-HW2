@@ -4,7 +4,7 @@ This is a C implementation of a SHE scheme based on the [Fan-Vercauteren](https:
 
 Warning: This code is for instruction only. Do not use this implementation in any practical setting!
 
-To run this code in a docker container, run the following command:
+To run this code in a docker container, run the following command (you do not need to download this repo before doing so):
 ```bash
 docker run -it rahulbansal2187/cs598ape_hw2 /bin/bash
 ```
